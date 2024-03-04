@@ -1,0 +1,2 @@
+rosbags==0.9.21
+rosbags-image==0.9.2
