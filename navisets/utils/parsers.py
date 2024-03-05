@@ -4,7 +4,10 @@ import shutil
 import numpy as np
 import cv2
 
+from abc import ABC, abstractmethod
 from pathlib import Path
+from functools import partial
+from concurrent.futures import ProcessPoolExecutor
 from rosbags.highlevel import AnyReader
 from rosbags.image import image_to_cvimage
 from navisets.utils.math import quaternion_to_yaw
@@ -17,7 +20,17 @@ class OverwritePolicy(enum.Enum):
     RAISE = "raise"
 
 
-class CameraReferencedRosbagParser:
+class AbstractRosbagParser(ABC):
+
+    @abstractmethod
+    def __call__(self,
+                 rosbag_path: Path,
+                 output_dir: Path,
+                 rosbag_name: str | None = None) -> Path | None:
+        raise NotImplementedError()
+
+
+class CameraReferencedRosbagParser(AbstractRosbagParser):
 
     DEFAULT_IMAGE_DIR_NAME = "rgb_images"
     DEFAULT_TRAJECTORY_FILE_NAME = "trajectory"
@@ -34,6 +47,7 @@ class CameraReferencedRosbagParser:
                  image_extension: str = DEFAULT_IMAGE_EXTENSION,
                  trajectory_file_name: str = DEFAULT_TRAJECTORY_FILE_NAME,
                  overwrite: OverwritePolicy = OverwritePolicy.DELETE) -> None:
+        super(CameraReferencedRosbagParser, self).__init__()
         assert rate_hz > 0., f"rate_hz must be > 0., got {rate_hz}"
         self._image_topic = image_topic
         self._odometry_topic = odometry_topic
@@ -119,7 +133,7 @@ class CameraReferencedRosbagParser:
         trajectory_data = trajectory_data[odometry_indices]
 
         n_zeros = calculate_zeros_pad(image_data)
-        for i, img_path in image_data:
+        for i, img_path in enumerate(image_data):
             new_path = img_path.parent / f"{zfill_zeros_pad(i, n_zeros)}.{self._image_extension}"
             img_path.rename(new_path)
         np.save(str(output_dir / self._trajectory_file_name), np.array(trajectory_data))
@@ -129,11 +143,11 @@ class CameraReferencedRosbagParser:
     @staticmethod
     def _resolve_rosbag_name(rosbag_path: Path) -> str | None:
         if rosbag_path.is_file():
-            extension = rosbag_path.name.split(".")[-1]
-            if extension == CameraReferencedRosbagParser._EXTENSION_BAG:
-                return "".join(extension[:-1])
+            name_parts = rosbag_path.name.split(".")
+            if name_parts[-1] == CameraReferencedRosbagParser._EXTENSION_BAG:
+                return "".join(name_parts[:-1])
             else:
-                return "".join(extension)
+                return "".join(name_parts)
         elif rosbag_path.is_dir():
             return rosbag_path.name
         return None
@@ -143,3 +157,28 @@ class CameraReferencedRosbagParser:
         diffs = np.abs(anchor_ts[:, np.newaxis] - source_ts[np.newaxis, :])
         indices = np.argmin(diffs, axis=1)
         return indices
+
+
+class MulitprocessRosbagParseWrapper:
+
+    N_WORKERS_NO_MULTIPROCESS = 0
+
+    def __init__(self, 
+                 parser: AbstractRosbagParser,
+                 n_workers: int) -> None:
+        assert isinstance(n_workers, int) and n_workers >= 0, f"n_workers must be int >= 0, got {n_workers}"
+        self._parser = parser
+        self._n_workers = n_workers
+
+    def __call__(self, rosbag_dirs: list[Path], output_parent_dir: Path) -> list[Path | None]:
+        process_fn = partial(self._parser, output_dir=output_parent_dir)
+
+        if len(rosbag_dirs) == 1:
+            return [process_fn(rosbag_dirs[0])]
+        
+        if self._n_workers == MulitprocessRosbagParseWrapper.N_WORKERS_NO_MULTIPROCESS:
+            return [process_fn(e) for e in rosbag_dirs]
+        
+        with ProcessPoolExecutor(max_workers=self._n_workers) as executor:
+            return [e for e in executor.map(process_fn, rosbag_dirs)]
+    
