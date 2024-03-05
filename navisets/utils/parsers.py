@@ -9,9 +9,12 @@ from pathlib import Path
 from functools import partial
 from concurrent.futures import ProcessPoolExecutor
 from rosbags.highlevel import AnyReader
-from rosbags.image import image_to_cvimage
+from rosbags.image import image_to_cvimage, compressed_image_to_cvimage
 from navisets.utils.math import quaternion_to_yaw
 from navisets.utils.strings import calculate_zeros_pad, zfill_zeros_pad
+
+
+_TYPE_COMPRESSED_IMAGE = "sensor_msgs/msg/CompressedImage"
 
 
 class OverwritePolicy(enum.Enum):
@@ -111,7 +114,10 @@ class CameraReferencedRosbagParser(AbstractRosbagParser):
                     if last_image_timestamp is None or (timestamp - last_image_timestamp) / 1e9 >= dt:
                         image_timestamps.append(timestamp)
                         msg = reader.deserialize(rawdata, connection.msgtype)
-                        img = image_to_cvimage(msg)
+                        if connection.msgtype == _TYPE_COMPRESSED_IMAGE:
+                            img = compressed_image_to_cvimage(msg)
+                        else:
+                            img = image_to_cvimage(msg)
                         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                         img_path = output_images_dir / \
                             f"{CameraReferencedRosbagParser._TEMP_PREFIX}{

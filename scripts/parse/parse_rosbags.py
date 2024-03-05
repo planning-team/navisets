@@ -7,20 +7,37 @@ from navisets.utils.parsers import CameraReferencedRosbagParser, MulitprocessRos
 
 _DEFAULT_RATE = 4.
 
-_IMAGE_TOPICS = ("/nerian_right/image_color", "/nerian_stereo/right_image")
-_ODOMETRY_TOPICS = ("/odometry/filtered",)
+_DATASET_RELLIS3D = "rellis3d"
+_DATASET_HURON = "huron"
+
+_IMAGE_TOPICS = {
+    _DATASET_RELLIS3D: ("/nerian_right/image_color", "/nerian_stereo/right_image"),
+    _DATASET_HURON: ("/fisheye_image/compressed",),
+}
+
+_ODOMETRY_TOPICS = {
+    _DATASET_RELLIS3D: ("/odometry/filtered",),
+    _DATASET_HURON: ("/odometry",)
+}
 
 
 def main(src_path: str,
          output_dir: str,
+         dataset: str,
          rate: float = _DEFAULT_RATE,
          n_workers: int = MulitprocessRosbagParseWrapper.N_WORKERS_NO_MULTIPROCESS,
          overwrite: bool = False):
+    supported_datasets = (_DATASET_RELLIS3D, _DATASET_HURON)
+    assert dataset in supported_datasets, f"Unknown dataset option {dataset}, available options are: {supported_datasets}"
     src_path = Path(src_path)
     output_dir = Path(output_dir)
 
+    ros1 = dataset in (_DATASET_RELLIS3D, _DATASET_HURON)
+    ros2 = False
+
     rosbag_paths = locate_rosbags(src_path,
-                                  ros2_bags=False)
+                                  ros1_bags=ros1,
+                                  ros2_bags=ros2)
     if len(rosbag_paths) == 0:
         print(f"Source path {
               src_path} is neither a ROS1 bag or directory with ROS1 bags, skipping")
@@ -29,8 +46,8 @@ def main(src_path: str,
 
     overwrite = OverwritePolicy.DELETE if overwrite else OverwritePolicy.STOP_SILENT
     parser = MulitprocessRosbagParseWrapper(parser=CameraReferencedRosbagParser(rate_hz=rate,
-                                                                                image_topic_candidates=_IMAGE_TOPICS,
-                                                                                odometry_topic_candidates=_ODOMETRY_TOPICS,
+                                                                                image_topic_candidates=_IMAGE_TOPICS[dataset],
+                                                                                odometry_topic_candidates=_ODOMETRY_TOPICS[dataset],
                                                                                 overwrite=overwrite),
                                             n_workers=n_workers)
     result = parser(rosbag_paths, output_dir)
