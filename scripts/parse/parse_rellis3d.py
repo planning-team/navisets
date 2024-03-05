@@ -7,8 +7,8 @@ from navisets.utils.parsers import CameraReferencedRosbagParser, MulitprocessRos
 
 _DEFAULT_RATE = 4.
 
-_IMAGE_TOPIC = "/nerian_right/image_color"  # "/pylon_camera_node/image_raw"
-_ODOMETRY_TOPIC = "/odometry/filtered"
+_IMAGE_TOPICS = ("/nerian_right/image_color", "/nerian_stereo/right_image")
+_ODOMETRY_TOPICS = ("/odometry/filtered",)
 
 
 def main(src_path: str,
@@ -29,8 +29,8 @@ def main(src_path: str,
 
     overwrite = OverwritePolicy.DELETE if overwrite else OverwritePolicy.STOP_SILENT
     parser = MulitprocessRosbagParseWrapper(parser=CameraReferencedRosbagParser(rate_hz=rate,
-                                                                                image_topic=_IMAGE_TOPIC,
-                                                                                odometry_topic=_ODOMETRY_TOPIC,
+                                                                                image_topic_candidates=_IMAGE_TOPICS,
+                                                                                odometry_topic_candidates=_ODOMETRY_TOPICS,
                                                                                 overwrite=overwrite),
                                             n_workers=n_workers)
     result = parser(rosbag_paths, output_dir)

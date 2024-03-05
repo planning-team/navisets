@@ -41,16 +41,18 @@ class CameraReferencedRosbagParser(AbstractRosbagParser):
 
     def __init__(self,
                  rate_hz: float,
-                 image_topic: str,
-                 odometry_topic: str,
+                 image_topic_candidates: str | tuple[str],
+                 odometry_topic_candidates: str | tuple[str],
                  images_dir_name: str = DEFAULT_IMAGE_DIR_NAME,
                  image_extension: str = DEFAULT_IMAGE_EXTENSION,
                  trajectory_file_name: str = DEFAULT_TRAJECTORY_FILE_NAME,
                  overwrite: OverwritePolicy = OverwritePolicy.DELETE) -> None:
         super(CameraReferencedRosbagParser, self).__init__()
         assert rate_hz > 0., f"rate_hz must be > 0., got {rate_hz}"
-        self._image_topic = image_topic
-        self._odometry_topic = odometry_topic
+        self._image_topic_candidates = (image_topic_candidates,) if isinstance(
+            image_topic_candidates, str) else image_topic_candidates
+        self._odometry_topic_candidates = (odometry_topic_candidates,) if isinstance(
+            odometry_topic_candidates, str) else odometry_topic_candidates
         self._rate = rate_hz
         self._overwrite = overwrite
         self._images_dir_name = images_dir_name
@@ -77,8 +79,7 @@ class CameraReferencedRosbagParser(AbstractRosbagParser):
                 case OverwritePolicy.STOP_SILENT:
                     return None
                 case OverwritePolicy.RAISE:
-                    raise RuntimeError(f"Output directory {
-                                       output_dir} already exists")
+                    raise RuntimeError(f"Output directory {output_dir} already exists")
                 case _:
                     raise ValueError(f"Unknown overwrite policy")
         output_images_dir = output_dir / self._images_dir_name
@@ -91,9 +92,14 @@ class CameraReferencedRosbagParser(AbstractRosbagParser):
         dt = 1 / self._rate
 
         with AnyReader([rosbag_path]) as reader:
+            image_topic, odometry_topic = self._filter_topics(reader)
+            if image_topic is None:
+                raise RuntimeError(f"Unable to find any of candidate image topic {self._image_topic_candidates} in rosbag {rosbag_path}")
+            if odometry_topic is None:
+                raise RuntimeError(f"Unable to find any of candidate odometry topic {self._odometry_topic_candidates} in rosbag {rosbag_path}")             
             connections = [e for e in reader.connections if e.topic in (
-                self._image_topic,
-                self._odometry_topic
+                image_topic,
+                odometry_topic
             )]
 
             last_image_timestamp = None
@@ -101,7 +107,7 @@ class CameraReferencedRosbagParser(AbstractRosbagParser):
 
             for connection, timestamp, rawdata in reader.messages(connections=connections):
 
-                if connection.topic == self._image_topic:
+                if connection.topic == image_topic:
                     if last_image_timestamp is None or (timestamp - last_image_timestamp) / 1e9 >= dt:
                         image_timestamps.append(timestamp)
                         msg = reader.deserialize(rawdata, connection.msgtype)
@@ -115,9 +121,9 @@ class CameraReferencedRosbagParser(AbstractRosbagParser):
                         image_count += 1
                         last_image_timestamp = timestamp
 
-                elif connection.topic == self._odometry_topic:
+                elif connection.topic == odometry_topic:
                     msg = reader.deserialize(rawdata, connection.msgtype)
-                    trajectory_data.append([msg.pose.pose.position.x, 
+                    trajectory_data.append([msg.pose.pose.position.x,
                                             msg.pose.pose.position.y,
                                             quaternion_to_yaw(msg.pose.pose.orientation.x,
                                                               msg.pose.pose.orientation.y,
@@ -129,16 +135,33 @@ class CameraReferencedRosbagParser(AbstractRosbagParser):
         trajectory_data = np.array(trajectory_data)
         trajectory_timestamps = np.array(trajectory_timestamps)
 
-        odometry_indices = CameraReferencedRosbagParser._sync_timestamps(image_timestamps, trajectory_timestamps)
+        odometry_indices = CameraReferencedRosbagParser._sync_timestamps(
+            image_timestamps, trajectory_timestamps)
         trajectory_data = trajectory_data[odometry_indices]
 
         n_zeros = calculate_zeros_pad(image_data)
         for i, img_path in enumerate(image_data):
-            new_path = img_path.parent / f"{zfill_zeros_pad(i, n_zeros)}.{self._image_extension}"
+            new_path = img_path.parent / \
+                f"{zfill_zeros_pad(i, n_zeros)}.{self._image_extension}"
             img_path.rename(new_path)
-        np.save(str(output_dir / self._trajectory_file_name), np.array(trajectory_data))
+        np.save(str(output_dir / self._trajectory_file_name),
+                np.array(trajectory_data))
 
         return output_dir
+
+    def _filter_topics(self, reader: AnyReader) -> tuple[str | None, str | None]:
+        image_topic = None
+        odometry_topic = None
+        reader_topics = reader.topics
+        for topic in self._image_topic_candidates:
+            if topic in reader_topics:
+                image_topic = topic
+                break
+        for topic in self._odometry_topic_candidates:
+            if topic in reader_topics:
+                odometry_topic = topic
+                break
+        return image_topic, odometry_topic
 
     @staticmethod
     def _resolve_rosbag_name(rosbag_path: Path) -> str | None:
@@ -163,10 +186,11 @@ class MulitprocessRosbagParseWrapper:
 
     N_WORKERS_NO_MULTIPROCESS = 0
 
-    def __init__(self, 
+    def __init__(self,
                  parser: AbstractRosbagParser,
                  n_workers: int) -> None:
-        assert isinstance(n_workers, int) and n_workers >= 0, f"n_workers must be int >= 0, got {n_workers}"
+        assert isinstance(
+            n_workers, int) and n_workers >= 0, f"n_workers must be int >= 0, got {n_workers}"
         self._parser = parser
         self._n_workers = n_workers
 
@@ -175,10 +199,9 @@ class MulitprocessRosbagParseWrapper:
 
         if len(rosbag_dirs) == 1:
             return [process_fn(rosbag_dirs[0])]
-        
+
         if self._n_workers == MulitprocessRosbagParseWrapper.N_WORKERS_NO_MULTIPROCESS:
             return [process_fn(e) for e in rosbag_dirs]
-        
+
         with ProcessPoolExecutor(max_workers=self._n_workers) as executor:
             return [e for e in executor.map(process_fn, rosbag_dirs)]
-    
