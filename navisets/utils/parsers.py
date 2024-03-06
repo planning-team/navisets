@@ -49,6 +49,7 @@ class CameraReferencedRosbagParser(AbstractRosbagParser):
                  images_dir_name: str = DEFAULT_IMAGE_DIR_NAME,
                  image_extension: str = DEFAULT_IMAGE_EXTENSION,
                  trajectory_file_name: str = DEFAULT_TRAJECTORY_FILE_NAME,
+                 convert_color: bool = True,
                  overwrite: OverwritePolicy = OverwritePolicy.DELETE) -> None:
         super(CameraReferencedRosbagParser, self).__init__()
         assert rate_hz > 0., f"rate_hz must be > 0., got {rate_hz}"
@@ -61,6 +62,7 @@ class CameraReferencedRosbagParser(AbstractRosbagParser):
         self._images_dir_name = images_dir_name
         self._image_extension = image_extension
         self._trajectory_file_name = trajectory_file_name
+        self._convert_color = convert_color
 
     def __call__(self,
                  rosbag_path: Path,
@@ -118,7 +120,8 @@ class CameraReferencedRosbagParser(AbstractRosbagParser):
                             img = compressed_image_to_cvimage(msg)
                         else:
                             img = image_to_cvimage(msg)
-                        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                        if self._convert_color:
+                            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                         img_path = output_images_dir / \
                             f"{CameraReferencedRosbagParser._TEMP_PREFIX}{
                                 image_count}.{self._image_extension}"
