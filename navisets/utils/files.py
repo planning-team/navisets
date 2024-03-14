@@ -6,18 +6,23 @@ _DIR_PATTERN = "*/"
 _ROS1_BAG_PATTERN = "*.bag"
 _ROS2_DB_PATTERN = "*.db3"
 _ROS2_METADATA_FILE_NAME = "metadata.yaml"
+_HDF5_EXTENSION = "hdf5"
 
 
-def check_ros1_bag(file_path: Path) -> bool:
-    if not file_path.is_file():
+def _check_file_extension(file_path: Path, extension: str) -> bool:
+    if file_path.is_file():
         return False
     name_parts = file_path.name.split(".")
     if len(name_parts) < 2:
         return False
     extension = name_parts[-1]
-    if extension != _ROS1_BAG_EXTENSION:
+    if extension != extension:
         return False
-    return True
+    return True    
+
+
+def check_ros1_bag(file_path: Path) -> bool:
+    return _check_file_extension(file_path, _ROS1_BAG_EXTENSION)
 
 
 def check_ros2_bag(dir_path: Path) -> bool:
@@ -33,6 +38,11 @@ def check_ros2_bag(dir_path: Path) -> bool:
     if not metadata_file.is_file():
         return False
     return True
+
+
+def check_hdf5_file(file_path: Path) -> bool:
+    return _check_file_extension(file_path, _HDF5_EXTENSION)
+
 
 
 def locate_rosbags(source_path: Path,
@@ -61,3 +71,14 @@ def locate_ros1_bags(parent_dir: Path) -> list[Path]:
 
 def locate_ros2_bags(parent_dir: Path) -> list[Path]:
     return [e for e in parent_dir.glob(_DIR_PATTERN) if check_ros2_bag(e)]
+
+
+def locate_hdf5_files(source_path: Path) -> list[Path]:
+    if source_path.is_file():
+        if check_hdf5_file(source_path):
+            return [source_path]
+        return []
+    elif source_path.is_dir():
+        return sorted(source_path.glob(f"*.{_HDF5_EXTENSION}"))
+    else:
+        return []

@@ -1,8 +1,10 @@
 import enum
-import os
+import io
 import shutil
+import traceback
 import numpy as np
 import cv2
+import h5py
 
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -12,6 +14,12 @@ from rosbags.highlevel import AnyReader
 from rosbags.image import image_to_cvimage, compressed_image_to_cvimage
 from navisets.utils.math import quaternion_to_yaw
 from navisets.utils.strings import calculate_zeros_pad, zfill_zeros_pad
+from PIL import Image
+
+
+DEFAULT_IMAGE_DIR_NAME = "rgb_images"
+DEFAULT_TRAJECTORY_FILE_NAME = "trajectory"
+DEFAULT_IMAGE_EXTENSION = "jpg"
 
 
 _TYPE_COMPRESSED_IMAGE = "sensor_msgs/msg/CompressedImage"
@@ -23,21 +31,23 @@ class OverwritePolicy(enum.Enum):
     RAISE = "raise"
 
 
-class AbstractRosbagParser(ABC):
+class TopicNotFoundPolicy(enum.Enum):
+    IGNORE_SILENT = "ignore_silent"
+    IGNORE_LOG = "ignore_log"
+    RAISE = "raise"
+
+
+class AbstractDataParser(ABC):
 
     @abstractmethod
     def __call__(self,
-                 rosbag_path: Path,
+                 input_path: Path,
                  output_dir: Path,
-                 rosbag_name: str | None = None) -> Path | None:
+                 output_name: str | None = None) -> Path | None:
         raise NotImplementedError()
 
 
-class CameraReferencedRosbagParser(AbstractRosbagParser):
-
-    DEFAULT_IMAGE_DIR_NAME = "rgb_images"
-    DEFAULT_TRAJECTORY_FILE_NAME = "trajectory"
-    DEFAULT_IMAGE_EXTENSION = "jpg"
+class CameraReferencedRosbagParser(AbstractDataParser):
 
     _EXTENSION_BAG = "bag"
     _TEMP_PREFIX = "temp_"
@@ -50,7 +60,8 @@ class CameraReferencedRosbagParser(AbstractRosbagParser):
                  image_extension: str = DEFAULT_IMAGE_EXTENSION,
                  trajectory_file_name: str = DEFAULT_TRAJECTORY_FILE_NAME,
                  convert_color: bool = True,
-                 overwrite: OverwritePolicy = OverwritePolicy.DELETE) -> None:
+                 overwrite: OverwritePolicy = OverwritePolicy.DELETE,
+                 topic_not_found: TopicNotFoundPolicy = TopicNotFoundPolicy.RAISE) -> None:
         super(CameraReferencedRosbagParser, self).__init__()
         assert rate_hz > 0., f"rate_hz must be > 0., got {rate_hz}"
         self._image_topic_candidates = (image_topic_candidates,) if isinstance(
@@ -59,23 +70,24 @@ class CameraReferencedRosbagParser(AbstractRosbagParser):
             odometry_topic_candidates, str) else odometry_topic_candidates
         self._rate = rate_hz
         self._overwrite = overwrite
+        self._topic_not_found_policy = topic_not_found
         self._images_dir_name = images_dir_name
         self._image_extension = image_extension
         self._trajectory_file_name = trajectory_file_name
         self._convert_color = convert_color
 
     def __call__(self,
-                 rosbag_path: Path,
+                 input_path: Path,
                  output_dir: Path,
-                 rosbag_name: str | None = None) -> Path | None:
-        if not (rosbag_path.is_file() or rosbag_path.is_dir()):
+                 output_name: str | None = None) -> Path | None:
+        if not (input_path.is_file() or input_path.is_dir()):
             raise ValueError(
-                f"rosbag_path {rosbag_path} must be a file or directory")
+                f"rosbag_path {input_path} must be a file or directory")
 
-        if rosbag_name is None:
-            rosbag_name = CameraReferencedRosbagParser._resolve_rosbag_name(
-                rosbag_path)
-        output_dir = output_dir / rosbag_name
+        if output_name is None:
+            output_name = CameraReferencedRosbagParser._resolve_rosbag_name(
+                input_path)
+        output_dir = output_dir / output_name
 
         if output_dir.is_dir():
             match self._overwrite:
@@ -87,8 +99,6 @@ class CameraReferencedRosbagParser(AbstractRosbagParser):
                     raise RuntimeError(f"Output directory {output_dir} already exists")
                 case _:
                     raise ValueError(f"Unknown overwrite policy")
-        output_images_dir = output_dir / self._images_dir_name
-        output_images_dir.mkdir(parents=True, exist_ok=False)
 
         image_data = []
         trajectory_data = []
@@ -96,16 +106,21 @@ class CameraReferencedRosbagParser(AbstractRosbagParser):
         trajectory_timestamps = []
         dt = 1 / self._rate
 
-        with AnyReader([rosbag_path]) as reader:
+        with AnyReader([input_path]) as reader:
             image_topic, odometry_topic = self._filter_topics(reader)
             if image_topic is None:
-                raise RuntimeError(f"Unable to find any of candidate image topic {self._image_topic_candidates} in rosbag {rosbag_path}")
+                self._handle_topic_not_found(self._image_topic_candidates, input_path)
+                return None
             if odometry_topic is None:
-                raise RuntimeError(f"Unable to find any of candidate odometry topic {self._odometry_topic_candidates} in rosbag {rosbag_path}")             
+                self._handle_topic_not_found(self._odometry_topic_candidates, input_path)          
+                return None
             connections = [e for e in reader.connections if e.topic in (
                 image_topic,
                 odometry_topic
             )]
+
+            output_images_dir = output_dir / self._images_dir_name
+            output_images_dir.mkdir(parents=True, exist_ok=False)
 
             last_image_timestamp = None
             image_count = 0
@@ -148,7 +163,7 @@ class CameraReferencedRosbagParser(AbstractRosbagParser):
             image_timestamps, trajectory_timestamps)
         trajectory_data = trajectory_data[odometry_indices]
 
-        n_zeros = calculate_zeros_pad(image_data)
+        n_zeros = calculate_zeros_pad(len(image_data))
         for i, img_path in enumerate(image_data):
             new_path = img_path.parent / \
                 f"{zfill_zeros_pad(i, n_zeros)}.{self._image_extension}"
@@ -172,6 +187,17 @@ class CameraReferencedRosbagParser(AbstractRosbagParser):
                 break
         return image_topic, odometry_topic
 
+    def _handle_topic_not_found(self, candidates: tuple[str], rosbag_path: Path) -> None:
+        match self._topic_not_found_policy:
+            case TopicNotFoundPolicy.IGNORE_SILENT:
+                return
+            case TopicNotFoundPolicy.IGNORE_LOG:
+                print(f"Unable to find any of candidate topic among {candidates} in rosbag {rosbag_path}")
+            case TopicNotFoundPolicy.RAISE:
+                raise RuntimeError(f"Unable to find any of candidate topic among {candidates} in rosbag {rosbag_path}")
+            case _:
+                raise ValueError(f"Unknown topic not found policy {self._topic_not_found_policy}")
+
     @staticmethod
     def _resolve_rosbag_name(rosbag_path: Path) -> str | None:
         if rosbag_path.is_file():
@@ -191,26 +217,101 @@ class CameraReferencedRosbagParser(AbstractRosbagParser):
         return indices
 
 
-class MulitprocessRosbagParseWrapper:
+class HDF5FileParser(AbstractDataParser):
+    
+    _HDF5_EXTENSION = "hdf5"
+    
+    def __init__(self,
+                 images_dir_name: str = DEFAULT_IMAGE_DIR_NAME,
+                 image_extension: str = DEFAULT_IMAGE_EXTENSION,
+                 trajectory_file_name: str = DEFAULT_TRAJECTORY_FILE_NAME,
+                 overwrite: OverwritePolicy = OverwritePolicy.DELETE) -> None:
+        super(HDF5FileParser, self).__init__()
+        self._images_dir_name = images_dir_name
+        self._image_extension = image_extension
+        self._trajectory_file_name = trajectory_file_name
+        self._overwrite = overwrite
+
+    def __call__(self, input_path: Path, output_dir: Path, output_name: str | None = None) -> Path | None:
+        if not input_path.is_file():
+            raise ValueError(f"Input path {input_path} muse be a file")
+        name_parts = input_path.name.split(".")
+        if name_parts[-1] != HDF5FileParser._HDF5_EXTENSION:
+            raise ValueError(f"Input file must have .{HDF5FileParser._HDF5_EXTENSION} extension, got {input_path}")
+        if output_name is None:
+            output_name = "".join(name_parts[:-1])
+        output_dir = output_dir / output_name
+
+        if output_dir.is_dir():
+            match self._overwrite:
+                case OverwritePolicy.DELETE:
+                    shutil.rmtree(str(output_dir))
+                case OverwritePolicy.STOP_SILENT:
+                    return None
+                case OverwritePolicy.RAISE:
+                    raise RuntimeError(f"Output directory {output_dir} already exists")
+                case _:
+                    raise ValueError(f"Unknown overwrite policy")
+        
+        output_images_dir = output_dir / self._images_dir_name
+        output_images_dir.mkdir(parents=True, exist_ok=False)
+        
+        hdf5_file = h5py.File(str(input_path), "r")
+        
+        position_data = hdf5_file["jackal"]["position"][:, :2]
+        yaw_data = hdf5_file["jackal"]["yaw"][()]
+        images_data = hdf5_file["images"]["rgb_left"]
+        n_frames = images_data.shape[0]
+        n_zeros = calculate_zeros_pad(n_frames)
+
+        if position_data.shape[0] != yaw_data.shape[0]:
+            raise RuntimeError(f"Position and yaw lengths do not match for {input_path}")
+        if position_data.shape[0] != n_frames:
+            raise RuntimeError(f"Position data and image data do not match for {input_path}")
+
+        trajectory = []
+        for i in range(n_frames):
+            image = Image.open(io.BytesIO(images_data[i]))
+            image_file = output_images_dir / f"{zfill_zeros_pad(i, n_zeros)}.{self._image_extension}"
+            image.save(str(image_file))
+            trajectory.append([position_data[i, 0], position_data[i, 1], yaw_data[i]])
+        
+        trajectory = np.array(trajectory)
+        np.save(str(output_dir / self._trajectory_file_name), trajectory)
+        
+        return output_dir
+
+
+class MulitprocessParseWrapper:
 
     N_WORKERS_NO_MULTIPROCESS = 0
 
     def __init__(self,
-                 parser: AbstractRosbagParser,
+                 parser: AbstractDataParser,
                  n_workers: int) -> None:
         assert isinstance(
             n_workers, int) and n_workers >= 0, f"n_workers must be int >= 0, got {n_workers}"
         self._parser = parser
         self._n_workers = n_workers
 
-    def __call__(self, rosbag_dirs: list[Path], output_parent_dir: Path) -> list[Path | None]:
-        process_fn = partial(self._parser, output_dir=output_parent_dir)
+    def __call__(self, input_paths: list[Path], output_parent_dir: Path) -> list[Path | None]:
+        process_fn = partial(self._do_parse, output_dir=output_parent_dir)
 
-        if len(rosbag_dirs) == 1:
-            return [process_fn(rosbag_dirs[0])]
+        if len(input_paths) == 1:
+            return [process_fn(input_paths[0])]
 
-        if self._n_workers == MulitprocessRosbagParseWrapper.N_WORKERS_NO_MULTIPROCESS:
-            return [process_fn(e) for e in rosbag_dirs]
+        if self._n_workers == MulitprocessParseWrapper.N_WORKERS_NO_MULTIPROCESS:
+            return [process_fn(e) for e in input_paths]
 
         with ProcessPoolExecutor(max_workers=self._n_workers) as executor:
-            return [e for e in executor.map(process_fn, rosbag_dirs)]
+            result = executor.map(process_fn, input_paths)
+            return [e for e in result]
+        
+    def _do_parse(self, input_path: Path, output_dir: Path) -> Path | None:
+        result = None
+        try:
+            result = self._parser(input_path, output_dir)
+        except Exception as e:
+            print(f"Exception handled when parsing {input_path}")
+            print(traceback.format_exc())
+        return result
