@@ -8,3 +8,7 @@ def quaternion_to_yaw(x: float, y: float, z: float, w: float) -> float:
     t4 = 1.0 - 2.0 * (y * y + z * z)
     yaw = np.arctan2(t3, t4)
     return yaw
+
+
+def to_relative_frame(points: np.ndarray, frame_origin: np.ndarray | None = None) -> np.ndarray:
+    raise NotImplementedError()
