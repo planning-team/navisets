@@ -44,7 +44,6 @@ def check_hdf5_file(file_path: Path) -> bool:
     return _check_file_extension(file_path, _HDF5_EXTENSION)
 
 
-
 def locate_rosbags(source_path: Path,
                    ros1_bags: bool = True,
                    ros2_bags: bool = True) -> list[Path]:
